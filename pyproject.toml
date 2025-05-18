@@ -1,0 +1,11 @@
+[project]
+name = "heart-disease"
+version = "0.1.0"
+description = "This project is an end-to-end Data Science pipeline focused on predicting heart disease based on patient attributes. Using machine learning techniques, I will analyze and extract valuable insights from the dataset to aid in understanding and diagnosing heart disease."
+readme = "README.md"
+requires-python = ">=3.11.12"
+dependencies = [
+    "matplotlib>=3.10.3",
+    "pandas>=2.2.3",
+    "pyarrow>=20.0.0",
+]
