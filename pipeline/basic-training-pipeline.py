@@ -5,22 +5,23 @@ Author: Simon Correa Marin
 GitHub: https://github.com/simon2326/Heart-disease
 
 Description:
-This script implements a full training pipeline for the Heart Disease classification model. It includes steps for data loading, type correction, preprocessing, model training with hyperparameter tuning, evaluation, and conditional saving based on a recall threshold.
+This script implements a full training pipeline for the Heart Disease classification model.
+It includes steps for data loading, type correction, preprocessing, model training with
+hyperparameter tuning, evaluation, and conditional saving based on a recall threshold.
 """
 
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from joblib import dump
-
 from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, FunctionTransformer
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.impute import SimpleImputer
 from sklearn.metrics import recall_score
-
+from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
 
 # ------------------------------------------
 # 1. CONSTANTS AND GLOBAL SETTINGS
@@ -52,7 +53,7 @@ COLUMNS_TO_USE = [
 
 # Feature groups as defined in the notebooks
 CATEGORICAL_COLS = ["chest_pain", "slope", "ca", "rest_ecg", "thal", "sex"]
-DISCRETE_NUMERIC = ["age", "max_hr", "chol", "rest_bp", "fbs", "exang"]  # include boolean-like as numeric
+DISCRETE_NUMERIC = ["age", "max_hr", "chol", "rest_bp", "fbs", "exang"]
 CONTINUOUS_NUMERIC = ["old_peak"]
 
 # Sub-groups of categoricals
@@ -63,10 +64,10 @@ ORDINAL_CATEGORICAL = ["ca", "slope"]
 TARGET_COL = "disease"
 BASELINE_SCORE = 0.70
 
+# ------------------------------------------
+# 2. DATA LOADING & TYPE CORRECTION
+# ------------------------------------------
 
-# ------------------------------------------
-# 2. DATA LOADING & TYPE CORRECTION FUNCTIONS
-# ------------------------------------------
 
 def load_raw_data() -> pd.DataFrame:
     """
@@ -82,30 +83,25 @@ def correct_types(df: pd.DataFrame) -> pd.DataFrame:
     Apply type corrections identical to DataExploration.ipynb:
     1. Clean numeric-like strings in nominal category columns (excluding 'ca' and 'slope').
     2. Cast categorical columns to pandas 'category'.
-    3. Convert numeric and boolean-like columns to float via to_numeric (coercing errors to NaN).
+    3. Convert numeric and boolean-like columns to float via to_numeric.
     4. Convert target column to integer (0/1).
     """
-    # 1. Remove numeric-looking strings in nominal categories (excluding 'ca' and 'slope')
     for col in CATEGORICAL_COLS:
         if col not in ["ca", "slope"]:
-            df[col] = df[col].apply(lambda x: x if isinstance(x, str) and not x.isnumeric() else np.nan)
-
-    # 2. Convert all categorical columns to 'category' dtype
+            df[col] = df[col].apply(
+                lambda x: x if isinstance(x, str) and not x.isnumeric() else np.nan
+            )
     df[CATEGORICAL_COLS] = df[CATEGORICAL_COLS].astype("category")
-
-    # 3. Convert numeric and boolean-like columns to float, coercing invalid parsing to NaN
     for col in DISCRETE_NUMERIC + CONTINUOUS_NUMERIC:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # 4. Convert target column to integer (0/1)
     df[TARGET_COL] = df[TARGET_COL].astype("bool").astype("int")
-
     return df
 
 
 # ------------------------------------------
 # 3. BUILD PREPROCESSING PIPELINE
 # ------------------------------------------
+
 
 def build_preprocessor() -> ColumnTransformer:
     """
@@ -115,15 +111,12 @@ def build_preprocessor() -> ColumnTransformer:
       - Ordinal categorical features (most frequent imputation + ordinal encoding)
     Note: boolean-like features are included in numeric.
     """
-    # Numeric pipeline: median imputation
     numeric_features = DISCRETE_NUMERIC + CONTINUOUS_NUMERIC
     numeric_pipe = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="median")),
         ]
     )
-
-    # Nominal categorical pipeline: most frequent imputation + one-hot encoding
     nominal_pipe = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="most_frequent")),
@@ -133,8 +126,6 @@ def build_preprocessor() -> ColumnTransformer:
             ),
         ]
     )
-
-    # Ordinal categorical pipeline: most frequent imputation + ordinal encoding
     ordinal_pipe = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="most_frequent")),
@@ -144,23 +135,22 @@ def build_preprocessor() -> ColumnTransformer:
             ),
         ]
     )
-
     preprocessor = ColumnTransformer(
         transformers=[
             ("numeric", numeric_pipe, numeric_features),
             ("nominal_cat", nominal_pipe, NOMINAL_CATEGORICAL),
             ("ordinal_cat", ordinal_pipe, ORDINAL_CATEGORICAL),
         ],
-        remainder="drop",  # drop any unused columns
+        remainder="drop",
         verbose_feature_names_out=False,
     )
-
     return preprocessor
 
 
 # ------------------------------------------
-# 4. MODEL PIPELINE & HYPERPARAMETER TUNING
+# 4. MODEL PIPELINE & TUNING
 # ------------------------------------------
+
 
 def build_model_pipeline(preprocessor: ColumnTransformer) -> Pipeline:
     """
@@ -176,7 +166,9 @@ def build_model_pipeline(preprocessor: ColumnTransformer) -> Pipeline:
     return pipeline
 
 
-def train_and_select_model(pipeline: Pipeline, X_train: pd.DataFrame, y_train: pd.Series) -> Pipeline:
+def train_and_select_model(
+    pipeline: Pipeline, X_train: pd.DataFrame, y_train: pd.Series
+) -> Pipeline:
     """
     Perform GridSearchCV over the RandomForestClassifier in the pipeline.
     Returns the best estimator (pipeline with best hyperparameters).
@@ -210,20 +202,15 @@ def evaluate_and_save(best_pipeline: Pipeline, X_test: pd.DataFrame, y_test: pd.
     recall = recall_score(y_test, y_pred)
     print(f"\nEvaluation recall on test set: {recall:.4f}")
 
-    # Compare against baseline threshold
     if recall > BASELINE_SCORE:
         print(f"Model passed baseline (recall {recall:.4f} > {BASELINE_SCORE})")
         output_dir = Path(__file__).resolve().parent / "models"
         output_dir.mkdir(parents=True, exist_ok=True)
-
         model_path = output_dir / "heart_disease_rf_model.joblib"
         dump(best_pipeline, model_path, protocol=5)
         print(f"Model saved to: {model_path}")
     else:
-        msg = (
-            f"Model did not pass baseline: recall {recall:.4f} ≤ {BASELINE_SCORE}. "
-            "Aborting save."
-        )
+        msg = f"Model did not pass baseline: recall {recall:.4f} ≤ {BASELINE_SCORE}. Aborting save."
         print(msg)
         raise ValueError(msg)
 
@@ -232,7 +219,8 @@ def evaluate_and_save(best_pipeline: Pipeline, X_test: pd.DataFrame, y_test: pd.
 # 5. MAIN SCRIPT EXECUTION
 # ------------------------------------------
 
-def main():
+
+def main() -> None:
     # Step 1: Load and correct types
     print("1. Loading raw data...")
     df = load_raw_data()
