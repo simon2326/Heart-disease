@@ -1,258 +1,279 @@
 """
-train_heart_disease_model.py
+basic-training-pipeline.py
 
 Author: Simon Correa Marin
 GitHub: https://github.com/simon2326/Heart-disease
 
-Description:
-This script implements a full training pipeline for the Heart Disease classification model.
-It includes steps for data loading, type correction, preprocessing, model training with
-hyperparameter tuning, evaluation, and conditional saving based on a recall threshold.
+A training pipeline for Heart Disease classification using LogisticRegression.
+Reads a preprocessed data, applies numeric encoding,
+performs 5-fold stratified cross-validation (CV), and if the recall exceeds 0.70 on the test set,
+saves the trained pipeline.
 """
 
 from pathlib import Path
-
-import numpy as np
 import pandas as pd
+import numpy as np
 from joblib import dump
+
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import recall_score
-from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold
+from sklearn.metrics import recall_score, roc_auc_score
 
 # ------------------------------------------
-# 1. CONSTANTS AND GLOBAL SETTINGS
+# 1. CONSTANTS & GLOBAL SETTINGS
 # ------------------------------------------
 
-# URL for downloading the cleaned Heart Disease CSV
-URL_DATA = (
-    "https://github.com/JoseRZapata/"
-    "Data_analysis_notebooks/raw/refs/heads/main/data/datasets/corazon_data.csv"
-)
+# Determine locations relative to this script
+THIS_FILE = Path(__file__).resolve()
+PROJECT_ROOT = THIS_FILE.parent.parent
+LOCAL_CSV = PROJECT_ROOT / "data" / "02_intermediate" / "hd_type_fixed.csv"
 
-# Columns to load from the dataset
-COLUMNS_TO_USE = [
-    "age",
-    "sex",
-    "chest_pain",
-    "rest_bp",
-    "chol",
-    "fbs",
-    "rest_ecg",
-    "max_hr",
-    "exang",
-    "old_peak",
-    "slope",
-    "ca",
-    "thal",
-    "disease",
-]
-
-# Feature groups as defined in the notebooks
-CATEGORICAL_COLS = ["chest_pain", "slope", "ca", "rest_ecg", "thal", "sex"]
-DISCRETE_NUMERIC = ["age", "max_hr", "chol", "rest_bp", "fbs", "exang"]
-CONTINUOUS_NUMERIC = ["old_peak"]
-
-# Sub-groups of categoricals
-NOMINAL_CATEGORICAL = ["chest_pain", "rest_ecg", "thal", "sex"]
-ORDINAL_CATEGORICAL = ["ca", "slope"]
-
-# Target column and baseline recall threshold
 TARGET_COL = "disease"
-BASELINE_SCORE = 0.70
+BASELINE_RECALL = 0.70
 
 # ------------------------------------------
-# 2. DATA LOADING & TYPE CORRECTION
+# 2. NUMERIC ENCODING MAPS (match hd_type_fixed.csv)
 # ------------------------------------------
-def load_raw_data() -> pd.DataFrame:
-    """
-    Load the raw heart disease CSV from the remote URL,
-    selecting only the specified columns.
-    """
-    df = pd.read_csv(URL_DATA, usecols=COLUMNS_TO_USE, low_memory=False, na_values="?")
-    return df
 
+SEX_MAP = {"male": 1, "female": 0}
 
-def correct_types(df: pd.DataFrame) -> pd.DataFrame:
+CHEST_MAP = {
+    "typical":      1,  # "typical" → 1
+    "nontypical":   2,  # "nontypical" → 2
+    "nonanginal":   3,  # "nonanginal" → 3
+    "asymptomatic": 4,  # "asymptomatic" → 4
+}
+
+REST_ECG_MAP = {
+    "normal":                       0,
+    "st-t wave abnormality":        1,
+    "left ventricular hypertrophy": 2,
+}
+
+# CSV uses "reversable" spelling
+THAL_MAP = {
+    "normal":     3,
+    "fixed":      6,
+    "reversable": 7,
+}
+
+# ------------------------------------------
+# 3. LOAD & MAP THE LOCAL CSV
+# ------------------------------------------
+
+def load_and_map_numeric() -> pd.DataFrame:
     """
-    Apply type corrections identical to DataExploration.ipynb:
-    1. Clean numeric-like strings in nominal category columns (excluding 'ca' and 'slope').
-    2. Cast categorical columns to pandas 'category'.
-    3. Convert numeric and boolean-like columns to float via to_numeric.
-    4. Convert target column to integer (0/1).
+    1. Read hd_type_fixed.csv from disk.
+    2. Map categorical columns to integer codes using predefined maps.
+    3. Convert numeric-like columns to float, coercing invalid values to NaN.
+    4. Drop any row that contains NaN in any required column.
     """
-    for col in CATEGORICAL_COLS:
-        if col not in ["ca", "slope"]:
-            df[col] = df[col].apply(
-                lambda x: x if isinstance(x, str) and not x.isnumeric() else np.nan
-            )
-    df[CATEGORICAL_COLS] = df[CATEGORICAL_COLS].astype("category")
-    for col in DISCRETE_NUMERIC + CONTINUOUS_NUMERIC:
+    df = pd.read_csv(LOCAL_CSV)
+
+    # Map string columns to numeric codes
+    df["sex"] = df["sex"].astype(str).str.strip().str.lower().map(SEX_MAP)
+    df["chest_pain"] = df["chest_pain"].astype(str).str.strip().str.lower().map(CHEST_MAP)
+    df["rest_ecg"] = df["rest_ecg"].astype(str).str.strip().str.lower().map(REST_ECG_MAP)
+    df["thal"] = df["thal"].astype(str).str.strip().str.lower().map(THAL_MAP)
+
+    # Convert boolean-like columns to numeric (coerce errors → NaN) and cast to Int64
+    df["fbs"] = pd.to_numeric(df["fbs"], errors="coerce").astype("Int64")
+    df["exang"] = pd.to_numeric(df["exang"], errors="coerce").astype("Int64")
+
+    # Convert remaining numeric columns (coerce invalid → NaN)
+    for col in ["age", "rest_bp", "chol", "max_hr", "old_peak", "slope", "ca"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    df[TARGET_COL] = df[TARGET_COL].astype("bool").astype("int")
+
+    # Convert target to 0/1
+    df["disease"] = df["disease"].astype("bool").astype("int")
+
+    # Drop rows with any NaN in required columns
+    df = df.dropna(
+        subset=[
+            "sex",
+            "chest_pain",
+            "rest_ecg",
+            "thal",
+            "fbs",
+            "exang",
+            "age",
+            "rest_bp",
+            "chol",
+            "max_hr",
+            "old_peak",
+            "slope",
+            "ca",
+            "disease",
+        ]
+    )
+
     return df
 
-
 # ------------------------------------------
-# 3. BUILD PREPROCESSING PIPELINE
+# 4. BUILD PREPROCESSOR & LOGISTIC REGRESSION PIPELINE
 # ------------------------------------------
 
-def build_preprocessor() -> ColumnTransformer:
+def build_preprocessor_numeric() -> ColumnTransformer:
     """
-    Construct a ColumnTransformer with separate pipelines for:
-      - Numeric features (median imputation)
-      - Nominal categorical features (most frequent imputation + one-hot encoding)
-      - Ordinal categorical features (most frequent imputation + ordinal encoding)
-    Note: boolean-like features are included in numeric.
+    Create a ColumnTransformer that applies median imputation to all 13 numeric features.
     """
-    numeric_features = DISCRETE_NUMERIC + CONTINUOUS_NUMERIC
+    numeric_cols = [
+        "age",
+        "sex",
+        "chest_pain",
+        "rest_bp",
+        "chol",
+        "fbs",
+        "rest_ecg",
+        "max_hr",
+        "exang",
+        "old_peak",
+        "slope",
+        "ca",
+        "thal",
+    ]
+
     numeric_pipe = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="median")),
-        ]
-    )
-
-    # Nominal categorical pipeline: most frequent imputation + one-hot encoding
-    nominal_pipe = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="most_frequent")),
-            (
-                "onehot",
-                OneHotEncoder(drop="if_binary", handle_unknown="ignore", sparse_output=False),
-            ),
-        ]
-    )
-
-    # Ordinal categorical pipeline: most frequent imputation + ordinal encoding
-    ordinal_pipe = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="most_frequent")),
-            (
-                "ordinal",
-                OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1),
-            ),
-        ]
+        steps=[("imputer", SimpleImputer(strategy="median"))]
     )
 
     preprocessor = ColumnTransformer(
-        transformers=[
-            ("numeric", numeric_pipe, numeric_features),
-            ("nominal_cat", nominal_pipe, NOMINAL_CATEGORICAL),
-            ("ordinal_cat", ordinal_pipe, ORDINAL_CATEGORICAL),
-        ],
+        transformers=[("num", numeric_pipe, numeric_cols)],
         remainder="drop",
         verbose_feature_names_out=False,
     )
     return preprocessor
 
 
-# ------------------------------------------
-# 4. MODEL PIPELINE & HYPERPARAMETER TUNING
-# ------------------------------------------
-
-def build_model_pipeline(preprocessor: ColumnTransformer) -> Pipeline:
+def build_model_pipeline_lr(preprocessor: ColumnTransformer) -> Pipeline:
     """
-    Integrate the preprocessor with a RandomForestClassifier into a single pipeline.
+    Integrate the numeric preprocessor with a LogisticRegression classifier.
     """
-    rf_clf = RandomForestClassifier(random_state=42)
-    pipeline = Pipeline(
-        steps=[
-            ("preprocessor", preprocessor),
-            ("model", rf_clf),
-        ]
+    lr = LogisticRegression(
+        solver="liblinear",  # suitable for smaller datasets
+        random_state=42,
+        max_iter=1000,
     )
+    pipeline = Pipeline([
+        ("preprocessor", preprocessor),
+        ("model", lr),
+    ])
     return pipeline
 
+# ------------------------------------------
+# 5. GRID SEARCH (STRATIFIED 5-FOLD CV) FOR RECALL
+# ------------------------------------------
 
-def train_and_select_model(
-    pipeline: Pipeline, X_train: pd.DataFrame, y_train: pd.Series
+def train_and_select_model_lr(
+    pipeline: Pipeline,
+    X_train: pd.DataFrame,
+    y_train: pd.Series
 ) -> Pipeline:
     """
-    Perform GridSearchCV over the RandomForestClassifier in the pipeline.
-    Returns the best estimator (pipeline with best hyperparameters).
+    Perform GridSearchCV over LogisticRegression's C parameter (values [0.01,0.1,1,10,100]),
+    optimizing for recall. Uses StratifiedKFold(n_splits=5) to ensure both classes
+    are present in each fold.
     """
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
     param_grid = {
-        "model__max_depth": [4, 5, 7, 9, 10],
-        "model__max_features": [2, 3, 4, 5, 6, 7, 8, 9],
-        "model__criterion": ["gini", "entropy"],
+        "model__C": [0.01, 0.1, 1, 10, 100],
+        "model__penalty": ["l2"],
     }
-    grid_search = GridSearchCV(
-        pipeline,
-        param_grid,
-        cv=5,
+
+    grid = GridSearchCV(
+        estimator=pipeline,
+        param_grid=param_grid,
+        cv=skf,
         scoring="recall",
         n_jobs=-1,
         verbose=1,
         return_train_score=True,
+        error_score="raise",
     )
-    grid_search.fit(X_train, y_train)
-    print("\n=== Best Hyperparameters ===")
-    print(grid_search.best_params_)
-    return grid_search.best_estimator_
 
+    grid.fit(X_train, y_train)
+    print("\n=== Best Hyperparameters (LogisticRegression) ===")
+    print(grid.best_params_)
 
-def evaluate_and_save(best_pipeline: Pipeline, X_test: pd.DataFrame, y_test: pd.Series) -> None:
+    return grid.best_estimator_
+
+# ------------------------------------------
+# 6. EVALUATE ON TEST SET & SAVE IF RECALL > 0.70
+# ------------------------------------------
+
+def evaluate_and_save_lr(
+    best_pipeline: Pipeline,
+    X_test: pd.DataFrame,
+    y_test: pd.Series
+) -> None:
     """
-    Evaluate the best pipeline on the test set using recall_score.
-    If recall exceeds BASELINE_SCORE, save the model as a .joblib file under 'models/'.
+    Compute recall and ROC AUC on the held-out test set. If recall exceeds
+    BASELINE_RECALL, save the pipeline under pipeline/models_lr/heart_disease_lr_model.joblib.
     """
     y_pred = best_pipeline.predict(X_test)
-    recall = recall_score(y_test, y_pred)
-    print(f"\nEvaluation recall on test set: {recall:.4f}")
+    recall_val = recall_score(y_test, y_pred)
+    roc_auc_val = roc_auc_score(
+        y_test,
+        best_pipeline.predict_proba(X_test)[:, 1]
+    )
 
-    # Compare against baseline threshold
-    if recall > BASELINE_SCORE:
-        print(f"Model passed baseline (recall {recall:.4f} > {BASELINE_SCORE})")
-        output_dir = Path(__file__).resolve().parent / "models"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        model_path = output_dir / "heart_disease_rf_model.joblib"
+    print(
+        f"\nEvaluation on Test Set:\n"
+        f"  Recall : {recall_val:.4f}\n"
+        f"  ROC AUC: {roc_auc_val:.4f}"
+    )
+
+    if recall_val > BASELINE_RECALL:
+        print(f"✅ Model passed baseline (recall {recall_val:.4f} > {BASELINE_RECALL})")
+        out_dir = THIS_FILE.parent / "models"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        model_path = out_dir / "heart_disease_lr_model.joblib"
         dump(best_pipeline, model_path, protocol=5)
         print(f"Model saved to: {model_path}")
     else:
-        msg = f"Model did not pass baseline: recall {recall:.4f} ≤ {BASELINE_SCORE}. Aborting save."
+        msg = (
+            f"❌ Model did not pass baseline: recall {recall_val:.4f} ≤ {BASELINE_RECALL}. "
+            "No model saved."
+        )
         print(msg)
         raise ValueError(msg)
 
-
 # ------------------------------------------
-# 5. MAIN SCRIPT EXECUTION
+# 7. MAIN ENTRYPOINT
 # ------------------------------------------
 
 def main() -> None:
-    # Step 1: Load and correct types
-    print("1. Loading raw data...")
-    df = load_raw_data()
+    print("1. Loading and mapping data to numeric codes (from local CSV)...")
+    df = load_and_map_numeric()
 
-    print("2. Applying type corrections...")
-    df = correct_types(df)
-
-    # Step 2: Split features and target
-    print("3. Splitting features and target...")
-    X = df.drop(TARGET_COL, axis="columns")
+    # Split features/target
+    X = df.drop(TARGET_COL, axis=1)
     y = df[TARGET_COL]
 
+    print("2. Splitting train/test (80/20)…")
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.20, stratify=y, random_state=42
+        X,
+        y,
+        test_size=0.20,
+        stratify=y,
+        random_state=42
     )
 
-    # Step 3: Build preprocessor and full pipeline
-    print("4. Building preprocessing pipeline...")
-    preprocessor = build_preprocessor()
+    print("3. Building numeric preprocessing pipeline…")
+    preprocessor = build_preprocessor_numeric()
 
-    print("5. Building full model pipeline...")
-    model_pipeline = build_model_pipeline(preprocessor)
+    print("4. Building LogisticRegression pipeline…")
+    lr_pipeline = build_model_pipeline_lr(preprocessor)
 
-    # Step 4: Train and hyperparameter selection
-    print("6. Training and hyperparameter selection (GridSearchCV)...")
-    best_pipeline = train_and_select_model(model_pipeline, X_train, y_train)
+    print("5. Training + hyperparameter selection (Stratified 5-fold CV)…")
+    best_lr_pipeline = train_and_select_model_lr(lr_pipeline, X_train, y_train)
 
-    # Step 5: Evaluate and conditional save
-    print("7. Evaluating and possibly saving the final model...")
-    evaluate_and_save(best_pipeline, X_test, y_test)
-
+    print("6. Evaluating on test set and possibly saving model…")
+    evaluate_and_save_lr(best_lr_pipeline, X_test, y_test)
 
 if __name__ == "__main__":
     main()
