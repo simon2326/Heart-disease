@@ -67,8 +67,6 @@ BASELINE_SCORE = 0.70
 # ------------------------------------------
 # 2. DATA LOADING & TYPE CORRECTION
 # ------------------------------------------
-
-
 def load_raw_data() -> pd.DataFrame:
     """
     Load the raw heart disease CSV from the remote URL,
@@ -102,7 +100,6 @@ def correct_types(df: pd.DataFrame) -> pd.DataFrame:
 # 3. BUILD PREPROCESSING PIPELINE
 # ------------------------------------------
 
-
 def build_preprocessor() -> ColumnTransformer:
     """
     Construct a ColumnTransformer with separate pipelines for:
@@ -117,6 +114,8 @@ def build_preprocessor() -> ColumnTransformer:
             ("imputer", SimpleImputer(strategy="median")),
         ]
     )
+
+    # Nominal categorical pipeline: most frequent imputation + one-hot encoding
     nominal_pipe = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="most_frequent")),
@@ -126,6 +125,8 @@ def build_preprocessor() -> ColumnTransformer:
             ),
         ]
     )
+
+    # Ordinal categorical pipeline: most frequent imputation + ordinal encoding
     ordinal_pipe = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="most_frequent")),
@@ -135,6 +136,7 @@ def build_preprocessor() -> ColumnTransformer:
             ),
         ]
     )
+
     preprocessor = ColumnTransformer(
         transformers=[
             ("numeric", numeric_pipe, numeric_features),
@@ -148,9 +150,8 @@ def build_preprocessor() -> ColumnTransformer:
 
 
 # ------------------------------------------
-# 4. MODEL PIPELINE & TUNING
+# 4. MODEL PIPELINE & HYPERPARAMETER TUNING
 # ------------------------------------------
-
 
 def build_model_pipeline(preprocessor: ColumnTransformer) -> Pipeline:
     """
@@ -202,6 +203,7 @@ def evaluate_and_save(best_pipeline: Pipeline, X_test: pd.DataFrame, y_test: pd.
     recall = recall_score(y_test, y_pred)
     print(f"\nEvaluation recall on test set: {recall:.4f}")
 
+    # Compare against baseline threshold
     if recall > BASELINE_SCORE:
         print(f"Model passed baseline (recall {recall:.4f} > {BASELINE_SCORE})")
         output_dir = Path(__file__).resolve().parent / "models"
@@ -218,7 +220,6 @@ def evaluate_and_save(best_pipeline: Pipeline, X_test: pd.DataFrame, y_test: pd.
 # ------------------------------------------
 # 5. MAIN SCRIPT EXECUTION
 # ------------------------------------------
-
 
 def main() -> None:
     # Step 1: Load and correct types
